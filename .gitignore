@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+
+# 环境与密钥（安全红线：Key 永远不进 git）
+.env
+.env.*
+
+# IDE
+.idea/
+.vscode/
+
+# 运行时产物
+.mini-code-memory/
+outputs/
