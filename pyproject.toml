@@ -1,0 +1,15 @@
+[project]
+name = "pcode"
+version = "0.1.0"
+description = "轻量级终端编码 Agent"
+requires-python = ">=3.10"
+dependencies = [
+    "openai>=1.0",
+    "rich>=13.0",
+]
+
+[project.scripts]
+pcode = "pcode.cli:main"
+
+[tool.setuptools]
+packages = ["pcode"]
