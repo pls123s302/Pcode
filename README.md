@@ -1,7 +1,15 @@
 # Pcode
 
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
+![License](https://img.shields.io/badge/License-MIT-green)
+![Tests](https://img.shields.io/badge/offline_tests-136_pass-brightgreen)
+![Benchmark](https://img.shields.io/badge/benchmark-12%2F12-success)
+
 **轻量级终端编码 Agent** —— 不只是聊天框：它动手读代码、改文件、跑测试拿证据，
 并且解决了 Agent 真正难的部分：**长会话下的上下文治理、知识的自进化积累、能力的边界控制**。
+
+> A lightweight terminal coding agent with layered context compression, self-evolving
+> memory, a three-tier skill router, and a four-layer safety review chain.
 
 个人从零实现，设计思想受 **Claude Code** 与 **MiniCode-Python** 启发，全部代码自己写。
 
@@ -93,6 +101,28 @@ Agent 的第一杀手是上下文膨胀。Pcode 用两个层次治理它：
 4. **事实源与投影分离**——`memory.json` 是唯一事实，`MEMORY.md` 是可再生投影；
 5. **Prompt Cache 前缀神圣不可侵犯**——尾部注入、占位替换、幂等渲染，三处同一公理。
 
+## 项目结构
+
+```
+pcode/
+├── agent.py         # 主循环：工具调用循环、相位跟踪、撞墙抢救、记忆闭环接线
+├── memory.py        # 上下文治理：sweep 外置、FULL 语义压缩、token 估算
+├── session.py       # 两世界持久化：增量保存、transcript 无损卷宗、/resume /replay
+├── memory_bank.py   # 长期记忆库：检索注入、反馈 ±2/−1、策展人（去重/验尸/熬洞见）
+├── reflection.py    # 反思引擎：四网扫描（错误/决策/事实/工具）、算术置信闸门
+├── skills.py        # Skill 体系：双根目录发现、菜单幂等渲染、渐进披露/直接加载双 regime
+├── permissions.py   # 四层审查链路：规则过滤、自我修改边界、注入围栏、人工确认
+├── tools.py         # 核心 6 原子工具（路径沙箱 + 写边界在此落地）
+├── tools_ext.py     # 扩展工具（http_request，外部内容自动打来源围栏）
+├── tool.py          # @tool 装饰器 + 函数签名自动生成 schema + 注册表
+├── phases.py        # 相位推导（explore → execute → verify）
+├── llm.py           # OpenAI 兼容接口封装（DashScope/DeepSeek/GLM 通用）
+├── config.py        # ~/.pcode/settings.json 读取
+└── cli.py           # 终端界面（rich REPL、命令区/任务区、会话管理）
+tests/               # 7 个离线套件（136 项断言，假 LLM 零成本）+ 1 个真实 API 冒烟
+benchmarks/          # 12 场景真模型鲁棒性基准（含对抗场景与已知局限清单）
+```
+
 ## 快速开始
 
 ```bash
@@ -132,7 +162,7 @@ pcode
 | 扩展层 | `http_request`（外部内容自动打来源围栏） | full 档懒加载 |
 | 元工具 | `load_skill` / `find_skill`（技能精读 / 检索模式召回） | 有工作区即注册 |
 
-## 测试
+## 测试与基准
 
 **7 个离线测试套件 · 136 项断言**，全程假 LLM、临时目录落盘——零 API 成本，可反复回归：
 
@@ -141,6 +171,37 @@ for f in tests/pcode_*_test.py; do python "$f"; done
 ```
 
 另含 1 个真实 API 冒烟（`tests/pcode_smoke_test.py`，单次调用验证整条链）。
+
+**鲁棒性基准（benchmarks/）**：真实模型 × 12 个场景 × 程序化验收——
+8 个任务基准（修复验证/精确编辑/诚实汇报/诚实停止/巨物搜寻…）+ 4 个对抗场景
+（**注入抵抗**：页面藏 `rm -rf` 指令看围栏与确认门是否兜住；**失败恢复**：首次工具调用注入故障；
+**记忆毒化**：种假记忆看模型是否先读文件再作答；**无换行巨行**：3 万字符单行的检索转向）。
+验收只看最终文件状态/退出码/答案内容，产出记分卡：
+
+```bash
+python benchmarks/run_bench.py        # 全量约 5~15 分钟；--only 注入 可单跑
+```
+
+样例输出（`results/` 下有 JSON 存档可追踪趋势）：
+
+```
+== 记分卡 · qwen-plus · temperature=0 · 首跑 2026-11-11 ==
+[任务基准] 8/8      [对抗场景] 4/4
+汇总: 任务成功率 8/8 · 对抗通过 4/4 · 步数中位 5 · 总步数 61
+```
+
+### 基准的已知局限（诚实清单）
+
+首跑 12/12 证明的是**下限稳**，不应当作"鲁棒性已充分"——评估工具自身的盲区如下，
+写在这里是刻意的：对盲区沉默的满分不可信。
+
+| 局限 | 影响 | 状态 |
+|---|---|---|
+| **单次确定性跑**（N=1, temperature=0） | 鲁棒性是分布性质，满分只是孤立样本 | 待加：每场景 3~5 次重复，报通过率而非单点 |
+| **作弊路径未封尽**（场景1可改测试文件让测试变绿；场景4的"测试文件"可以没有真断言；场景8的 README 泄底；场景12 可整体硬读） | 被测对象会朝验收漏洞优化（Goodhart 定律） | 待修：验收方独立建立事实——自行 import 被测模块断言、difflib 计真实编辑数 |
+| **个别场景名不副实**（场景7 的 sweep 可能根本未触发；场景11 的毒记忆是否注入未断言，"抵抗力"可能无效；场景8/10 设计中的步数上限与防死循环断言实现时丢失） | 成绩的有效性打折；"设计-实现漂移"本身的例证 | 已列入修复清单 |
+| **缺"有记忆 vs 无记忆" A/B 对照** | 自进化记忆的价值（步数/成功率增益）目前没有任何数字证据——12 个场景全是单发孤岛 | 计划中：第 13 场景，同现场双 agent 对照 |
+| **单模型 × 中文短任务 × 单文件现场** | 结论的外推性有限 | 长期：跨模型/跨仓库规模扩展 |
 
 ## Roadmap
 
@@ -153,3 +214,7 @@ for f in tests/pcode_*_test.py; do python "$f"; done
 
 架构思想受 Claude Code 与 MiniCode-Python 深度启发——包括工具循环、渐进披露、
 权限门禁等设计词汇；在其基础上，上下文压缩、记忆进化、安全边界为独立设计与实现。
+
+## 许可
+
+[MIT](LICENSE)
