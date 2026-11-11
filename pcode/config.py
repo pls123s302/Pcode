@@ -27,4 +27,5 @@ def load_settings() -> dict:
         "model": pick("model", "PCODE_MODEL", DEFAULT_MODEL),
         "api_key": pick("api_key", "DASHSCOPE_API_KEY"),
         "base_url": pick("base_url", "PCODE_BASE_URL", DEFAULT_BASE_URL),
+        "tool_profile": pick("tool_profile", "PCODE_TOOL_PROFILE", "core"),
     }

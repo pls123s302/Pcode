@@ -131,10 +131,15 @@ def _safe_boundary(messages: list, start: int) -> int:
 
 def compact_messages(llm, messages: list,
                      threshold: int = COMPACT_THRESHOLD_TOKENS,
-                     keep_recent: int = KEEP_RECENT) -> list:
+                     keep_recent: int = KEEP_RECENT,
+                     force: bool = False) -> list:
     """超过阈值时：旧消息请模型总结成[历史摘要]，最近N条原文保留。
+    force=True 绕过估算门槛直接压——撞墙抢救专用：刚撞的墙证明估算已失真，
+    "估算说没超"不能再当免压理由（但配对保护和材料不足的拒绝依然生效）。
+    防滚雪球：如果旧消息里已有[历史摘要]，把它拎出来作为合并基底
+    （全文传入、不截断），要求模型"合并"而不是"重压"——阻断摘要的摘要失真链。
     返回新的消息列表（不修改传入列表）。"""
-    if estimate_messages_tokens(messages) <= threshold:
+    if not force and estimate_messages_tokens(messages) <= threshold:
         return messages
     if len(messages) <= keep_recent + 2:
         return messages
@@ -144,14 +149,31 @@ def compact_messages(llm, messages: list,
     if not old:
         return messages
 
+    # 防滚雪球核心：把旧的[历史摘要]从old里拎出来，全文作为合并基底
+    prev_summary = ""
+    rest = []
+    for m in old:
+        c = _msg_field(m, "content") or ""
+        if isinstance(c, str) and c.startswith("[历史摘要]"):
+            prev_summary += c.replace(
+                "[历史摘要] 以下是更早对话的压缩记录，请结合它理解后续请求：", ""
+            ).strip() + "\n"
+        else:
+            rest.append(m)
+
     prompt = f"""请把以下对话历史压缩成一段中文摘要，供AI助手快速回忆。
 要求：
 1. 保留关键事实：文件路径、数字、报错信息、任务状态、用户的偏好和要求
 2. 丢弃寒暄和过程性细节（工具调用的中间输出）
-3. 直接输出摘要文本，不要任何解释
+3. 如果提供了【已有摘要】，必须把【已有摘要】与【新增对话历史】合并成一份完整摘要：
+   已有摘要中的每一条事实都必须保留（可精炼表述，不可删除条目），新事实追加进去
+4. 直接输出合并后的完整摘要，不要任何解释
 
-【对话历史】
-{_flatten(old)}"""
+【已有摘要】
+{prev_summary or "（无）"}
+
+【新增对话历史】
+{_flatten(rest)}"""
 
     summary = llm.chat([{"role": "user", "content": prompt}]).content
 

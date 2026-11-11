@@ -1,5 +1,6 @@
 """Pcode CLI — 终端界面"""
 import argparse
+import os
 import time
 from pathlib import Path
 
@@ -13,7 +14,12 @@ from pcode.llm import LLM
 from pcode.session import (Session, load_session, list_sessions,
                            get_latest_session)
 from pcode.memory import set_session
-from pcode.tools import create_tool_collection
+from pcode.memory_bank import MemoryBank
+from pcode.skills import (discover_skills, render_skill_menu,
+                          render_retrieval_hint, injection_block,
+                          is_retrieval_mode)
+from pcode.tools import create_tool_collection_profiled
+from pcode.permissions import PermissionManager, install as install_permission_gate
 
 console = Console()
 
@@ -68,8 +74,8 @@ def show_replay(session):
     ))
 
 
-def build_agent() -> Agent:
-    """装配大脑：读配置（没有就提醒用户去建）→ 模型 + 工具箱 + 主循环"""
+def build_agent(workspace: str) -> Agent:
+    """装配大脑：读配置（没有就提醒用户去建）→ 模型 + 工具箱 + 记忆库 + 主循环"""
     cfg = load_settings()
     if not cfg["api_key"]:
         console.print(Panel(
@@ -87,10 +93,40 @@ def build_agent() -> Agent:
 
     console.print(f"[dim]模型: {cfg['model']} · 配置: {SETTINGS_PATH}[/dim]")
     llm = LLM(model=cfg["model"], api_key=cfg["api_key"], base_url=cfg["base_url"])
+    # 工具面分档（settings.json 的 tool_profile / 环境变量 PCODE_TOOL_PROFILE）
+    profile = os.environ.get("PCODE_TOOL_PROFILE") or cfg.get("tool_profile") or "core"
+    bank = MemoryBank(workspace=workspace)   # 单作用域 ~/.pcode/memory/，workspace只给验尸用
+    discovered = discover_skills(workspace)
+    retrieval = is_retrieval_mode(workspace)          # regime 判定：>MENU_MAX 切检索
+    if retrieval:
+        skill_menu = render_retrieval_hint(len(discovered))
+        skill_search = lambda task, cu: injection_block(workspace, task, cu)
+    else:
+        skill_menu = render_skill_menu(discovered)
+        skill_search = None
+    # ── 权限与安全审查（第4层：人工确认门）──────────────────────
+    # 规则过滤/工具自检/外部内容标记在工具层永远生效；确认门只有 TTY 会话才有，
+    # 这里把 y/a/n 回调装进闸里。"a"只在本会话免重复问，落盘总允许走 permissions.json
+    def _confirm(cmd_sig: str, reason: str) -> str:
+        console.print(Panel(f"[bold]命令:[/bold] {cmd_sig}\n[bold]命中:[/bold] {reason}",
+                            title="⚠ 危险命令需要人工确认", border_style="yellow"))
+        ans = console.input(
+            "[bold yellow]放行？[y]仅这一次 [a]本会话内总是放行 [n]拒绝: [/bold yellow]"
+        ).strip().lower()
+        return {"y": "once", "a": "always"}.get(ans, "deny")
+
+    install_permission_gate(PermissionManager(prompt=_confirm))
+
+    console.print(f"[dim]记忆库: {bank.root}（{len(bank.entries)}条） · "
+                  f"工具档: {profile} · 技能: {len(discovered)}个"
+                  f"（{'检索' if retrieval else '菜单'}模式） · 门禁: 已武装[/dim]")
     return Agent(
         llm=llm,
-        tools=create_tool_collection(),
+        tools=create_tool_collection_profiled(profile, workspace=workspace),
         max_steps=50,
+        memory_bank=bank,
+        skill_menu=skill_menu,
+        skill_search=skill_search,
         on_phase=lambda phase, step: console.print(
             f"[dim]📍 相位 → [bold]{phase}[/bold] (第{step}步)[/dim]"
         ),
@@ -123,7 +159,7 @@ def main():
         show_sessions(workspace)
         return
 
-    agent = build_agent()
+    agent = build_agent(workspace)
 
     # 会话决策（复刻 MiniCode 的 load_or_create_session 三分支）
     if args.resume == "latest":
@@ -221,6 +257,7 @@ def main():
             except KeyboardInterrupt:
                 answer = "（本轮任务被你中断）"
             except Exception as e:
+                agent.report_failure()           # 💥 追责：本轮注入过的记忆−1
                 answer = f"**出错了**: {e}"
 
         try:
