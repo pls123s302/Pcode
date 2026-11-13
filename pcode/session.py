@@ -1,9 +1,17 @@
 """会话持久化：主文件 + 增量目录的混合保存（复刻 MiniCode 三层策略，修正其计数bug）
 
+存储布局（按项目分区，与项目级记忆同一工作区键，见 paths.py）：
+    ~/.pcode/projects/<工作区键>/sessions/<id>.json        全量主文件
+    ~/.pcode/projects/<工作区键>/sessions/deltas/<id>/      增量片
+    ~/.pcode/sessions/                                     旧版平铺布局：只读回退
+分区红利：/sessions 只扫本项目目录，不再全盘读文件过滤 workspace 字段。
+
 行为规则（与 MiniCode 对齐）：
 - 启动默认开新会话；恢复必须显式 /resume latest 或 /resume <id>
-- /sessions 只列出当前工作区的会话（workspace 精确匹配）
-- /resume <id> 允许跨工作区恢复，不检查——文件安全由权限层兜底
+- /sessions 只列出当前工作区的会话（目录即分区，零过滤）
+- /resume <id> 允许跨工作区恢复：当前工作区 → 其他项目目录 → 旧平铺目录
+  ——文件安全由权限层兜底
+- 旧会话按 id 仍可恢复；首次保存即整体迁入新家（migration-on-save）
 
 保存策略（增量 + 定期全量，把"勤保存"的成本从 O(总量) 降到 O(增量)）：
 - 首次保存 = 全量快照（sessions/<id>.json，含两本账全部内容）
@@ -23,11 +31,19 @@ import time
 import uuid
 from pathlib import Path
 
-SESSIONS_DIR = Path.home() / ".pcode" / "sessions"
+from pcode import paths
+from pcode.paths import project_dir
+
+LEGACY_SESSIONS_DIR = Path.home() / ".pcode" / "sessions"   # 旧版平铺：只读回退（测试可改道）
 DELTA_DIR_NAME = "deltas"
 _FULL_SAVE_INTERVAL = 10    # 每攒10个增量片做一次全量合并
 _MAX_DELTA_FILES = 50       # 安全帽：增量片到50强制全量，防目录无限膨胀
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")   # 防路径穿越：id 只允许安全字符
+
+
+def sessions_dir(workspace: str) -> Path:
+    """本项目会话目录：~/.pcode/projects/<工作区键>/sessions/"""
+    return project_dir(workspace) / "sessions"
 
 
 def _json_default(o):
@@ -44,10 +60,6 @@ def _atomic_write_json(path: Path, data) -> None:
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1, default=_json_default),
                    encoding="utf-8")
     os.replace(tmp, path)
-
-
-def _delta_dir(session_id: str) -> Path:
-    return SESSIONS_DIR / DELTA_DIR_NAME / session_id
 
 
 def _to_store(msg):
@@ -75,6 +87,7 @@ class Session:
         self._saved_trans = 0                              # 已落盘的 transcript 条数
         self._delta_count = 0                              # 本次全量以来写了几个增量片
         self._has_full = False                             # 是否已有全量基底（首次保存必须全量）
+        self._store_dir: Path | None = None                # 全量主文件现居目录（None=尚无）
 
     # ── 账本操作 ────────────────────────────────────────────
     def append(self, message):
@@ -118,8 +131,14 @@ class Session:
 
     # ── 混合保存 ────────────────────────────────────────────
     def save(self, force_full: bool = False):
-        """该全量时全量（首存/攒满/安全帽/强制），平时走增量（KB级，O(新增)）"""
+        """该全量时全量（首存/攒满/安全帽/强制/换家），平时走增量（KB级，O(新增)）。
+        空会话不落盘：0条消息没有信息量——退出时存盘、/new 时存盘这类边界
+        会对一个字没聊的会话触发 save，写了只是给 /sessions 制造幽灵行"""
+        if not self.messages and not self.transcript:
+            return
         if force_full or not self._has_full \
+                or (self._store_dir is not None
+                    and self._store_dir != sessions_dir(self.workspace)) \
                 or self._delta_count >= _FULL_SAVE_INTERVAL \
                 or self._delta_count >= _MAX_DELTA_FILES:
             self._save_full()
@@ -128,6 +147,7 @@ class Session:
 
     def _save_full(self):
         self.updated_at = time.time()
+        home = sessions_dir(self.workspace)
         data = {
             "session_id": self.session_id,
             "created_at": self.created_at,
@@ -137,7 +157,8 @@ class Session:
             "messages": self.messages,
             "transcript": self.transcript,
         }
-        _atomic_write_json(SESSIONS_DIR / f"{self.session_id}.json", data)
+        _atomic_write_json(home / f"{self.session_id}.json", data)
+        self._store_dir = home
         self._has_full = True
         self._saved_msg = len(self.messages)
         self._saved_trans = len(self.transcript)
@@ -149,7 +170,7 @@ class Session:
         new_trans = self.transcript[self._saved_trans:]
         if not new_msgs and not new_trans:
             return                                  # 没有新货，不产生空片
-        d = _delta_dir(self.session_id)
+        d = sessions_dir(self.workspace) / DELTA_DIR_NAME / self.session_id
         d.mkdir(parents=True, exist_ok=True)
         self._delta_count += 1
         data = {"ts": time.time(),
@@ -164,29 +185,30 @@ class Session:
         self._saved_trans = len(self.transcript)
 
     def _clear_deltas(self):
-        """全量已吸收全部内容，增量片的历史使命完成——删除（信息在主文件里）"""
-        d = _delta_dir(self.session_id)
-        if not d.is_dir():
-            return
-        for f in d.glob("delta_*.json"):
+        """全量已吸收全部内容，增量片的历史使命完成——删除（信息在主文件里）。
+        换家迁移时新旧两家的增量目录都清：旧家的尾巴已被新家主文件吸收"""
+        seen = set()
+        for base in {sessions_dir(self.workspace), self._store_dir}:
+            if base is None or base in seen:
+                continue
+            seen.add(base)
+            d = base / DELTA_DIR_NAME / self.session_id
+            if not d.is_dir():
+                continue
+            for f in d.glob("delta_*.json"):
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
             try:
-                f.unlink()
+                d.rmdir()                           # 空了就连目录一起收走
             except OSError:
                 pass
-        try:
-            d.rmdir()                               # 空了就连目录一起收走
-        except OSError:
-            pass
 
 
 # ── 加载（主文件 + 回放增量，偏移量幂等）────────────────────
-def load_session(session_id: str) -> Session | None:
-    """按 id 加载。无工作区检查——跨工作区恢复是合法操作"""
-    if not _SAFE_ID.match(session_id):    # "../etc" 之类的id直接拒绝
-        return None
-    f = SESSIONS_DIR / f"{session_id}.json"
-    if not f.exists():
-        return None
+def _load_from(base: Path, f: Path) -> Session | None:
+    """从指定目录加载一个会话（主文件 + 同目录的增量尾巴）"""
     try:
         data = json.loads(f.read_text(encoding="utf-8-sig"))
     except (json.JSONDecodeError, OSError):
@@ -199,7 +221,7 @@ def load_session(session_id: str) -> Session | None:
     s.transcript = data.get("transcript", [])
 
     # 回放增量片：偏移量 >= 当前长度 → 是新货，应用；否则已被主文件吸收，跳过
-    d = _delta_dir(session_id)
+    d = base / DELTA_DIR_NAME / s.session_id
     if d.is_dir():
         applied = 0
         for df in sorted(d.glob("delta_*.json")):
@@ -222,42 +244,71 @@ def load_session(session_id: str) -> Session | None:
     s._saved_msg = len(s.messages)
     s._saved_trans = len(s.transcript)
     s._has_full = True
+    s._store_dir = base                      # 记住现居地址：异地首次保存自动整体迁入
     return s
 
 
+def load_session(session_id: str, workspace: str | None = None) -> Session | None:
+    """按 id 加载：当前工作区 → 其他项目目录 → 旧平铺目录。
+    无工作区限制——跨工作区恢复是合法操作"""
+    if not _SAFE_ID.match(session_id):    # "../etc" 之类的id直接拒绝
+        return None
+    bases = []
+    if workspace:
+        bases.append(sessions_dir(workspace))
+    if paths.PROJECTS_ROOT.is_dir():      # 扫其他项目目录（存在性检查，每家一次）
+        for d in sorted(paths.PROJECTS_ROOT.glob("*/sessions")):
+            if d not in bases:
+                bases.append(d)
+    bases.append(LEGACY_SESSIONS_DIR)
+    for base in bases:
+        f = base / f"{session_id}.json"
+        if f.exists():
+            s = _load_from(base, f)
+            if s is not None:
+                return s
+    return None
+
+
 def list_sessions(workspace: str | None = None) -> list:
-    """列出会话元数据（按更新时间倒序）。传 workspace 则精确过滤。
+    """列出会话元数据（按更新时间倒序）。
+    workspace 给定：只扫本项目目录（目录即分区，零字段过滤）；
+    workspace=None：扫全部项目目录 + 旧平铺（管理视图）。
     计数和时间合并增量尾巴——否则主文件未合并时显示的是旧数据"""
+    if workspace is not None:
+        bases = [sessions_dir(workspace)]
+    else:
+        root = project_dir("~").parent
+        bases = sorted(root.glob("*/" + "sessions")) + [LEGACY_SESSIONS_DIR]
     out = []
-    if not SESSIONS_DIR.exists():
-        return out
-    for f in SESSIONS_DIR.glob("*.json"):
-        try:
-            data = json.loads(f.read_text(encoding="utf-8-sig"))
-        except (json.JSONDecodeError, OSError):
+    for base in bases:
+        if not base.is_dir():
             continue
-        if workspace is not None and data.get("workspace") != workspace:
-            continue
-        msg_count = len(data.get("messages", []))
-        updated = data.get("updated_at", 0)
-        d = _delta_dir(f.stem)
-        if d.is_dir():
-            for df in sorted(d.glob("delta_*.json")):
-                try:
-                    dd = json.loads(df.read_text(encoding="utf-8-sig"))
-                except (json.JSONDecodeError, OSError):
-                    continue
-                msg_count += len(dd.get("messages", []))
-                updated = max(updated, dd.get("ts", 0))
-        out.append({
-            "session_id": data.get("session_id", f.stem),
-            "title": data.get("title", ""),
-            "updated_at": updated,
-            "message_count": msg_count,
-        })
+        for f in base.glob("*.json"):
+            try:
+                data = json.loads(f.read_text(encoding="utf-8-sig"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            msg_count = len(data.get("messages", []))
+            updated = data.get("updated_at", 0)
+            d = base / DELTA_DIR_NAME / f.stem
+            if d.is_dir():
+                for df in sorted(d.glob("delta_*.json")):
+                    try:
+                        dd = json.loads(df.read_text(encoding="utf-8-sig"))
+                    except (json.JSONDecodeError, OSError):
+                        continue
+                    msg_count += len(dd.get("messages", []))
+                    updated = max(updated, dd.get("ts", 0))
+            out.append({
+                "session_id": data.get("session_id", f.stem),
+                "title": data.get("title", ""),
+                "updated_at": updated,
+                "message_count": msg_count,
+            })
     return sorted(out, key=lambda m: m["updated_at"], reverse=True)
 
 
 def get_latest_session(workspace: str | None = None) -> Session | None:
     metas = list_sessions(workspace=workspace)
-    return load_session(metas[0]["session_id"]) if metas else None
+    return load_session(metas[0]["session_id"], workspace=workspace) if metas else None

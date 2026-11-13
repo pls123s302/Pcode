@@ -39,6 +39,8 @@ HELP_TEXT = """\
 |----------------|-------------------------------|
 | /help          | 显示本帮助                    |
 | /tools         | 查看我的工具箱                |
+| # 内容         | 记住一句话（默认项目级；# user:内容=跨项目） |
+| # state:键 值  | 更新状态键值（同key覆盖，立即生效） |
 | /new           | 开一个全新会话                |
 | /sessions      | 列出本工作区的历史会话        |
 | /resume latest | 恢复本工作区最近的会话        |
@@ -95,7 +97,7 @@ def build_agent(workspace: str) -> Agent:
     llm = LLM(model=cfg["model"], api_key=cfg["api_key"], base_url=cfg["base_url"])
     # 工具面分档（settings.json 的 tool_profile / 环境变量 PCODE_TOOL_PROFILE）
     profile = os.environ.get("PCODE_TOOL_PROFILE") or cfg.get("tool_profile") or "core"
-    bank = MemoryBank(workspace=workspace)   # 单作用域 ~/.pcode/memory/，workspace只给验尸用
+    bank = MemoryBank(workspace=workspace)   # 双作用域：用户级~/.pcode/memory + 项目级<工作区>/.pcode/memory（可进git共享）
     discovered = discover_skills(workspace)
     retrieval = is_retrieval_mode(workspace)          # regime 判定：>MENU_MAX 切检索
     if retrieval:
@@ -117,7 +119,9 @@ def build_agent(workspace: str) -> Agent:
 
     install_permission_gate(PermissionManager(prompt=_confirm))
 
-    console.print(f"[dim]记忆库: {bank.root}（{len(bank.entries)}条） · "
+    proj_memory = (bank._project.root if bank._project else "停用")
+    console.print(f"[dim]记忆: 用户{bank.user_root}（{len(bank._user.entries)}条） · "
+                  f"项目{proj_memory}（{len(bank._project.entries) if bank._project else 0}条） · "
                   f"工具档: {profile} · 技能: {len(discovered)}个"
                   f"（{'检索' if retrieval else '菜单'}模式） · 门禁: 已武装[/dim]")
     return Agent(
@@ -173,7 +177,7 @@ def main():
             session = Session(workspace=workspace)
             set_session(session.session_id)
     elif args.resume:
-        session = load_session(args.resume)
+        session = load_session(args.resume, workspace=workspace)
         if session is None:
             console.print(f"[red]会话 {args.resume} 不存在。[/red]")
             raise SystemExit(1)
@@ -227,11 +231,48 @@ def main():
         if text == "/replay":
             show_replay(session)
             continue
+        if text.startswith("#"):                 # ── 显式记忆捕获（# 通道，抄 MiniCode）──
+            content = text[1:].strip()
+            if not content:
+                console.print("[yellow]用法: # 内容 | # user:内容 | "
+                              "# state:键 值 | # state:user:键 值[/yellow]")
+                continue
+            if agent.memory_bank is None:
+                console.print("[red]记忆库未启用，无法捕获[/red]")
+                continue
+            scope = "project"                    # 默认项目级（任务语境）
+            if content.startswith("user:"):      # # user:内容 → 跨项目通用
+                scope = "user"
+                content = content[len("user:"):].strip()
+                if not content:
+                    console.print("[yellow]用法: # user: 要记住的通用内容[/yellow]")
+                    continue
+            if content.startswith("state:"):     # 状态语法：# state:键 值（可加 user: 前缀）
+                kv = content[len("state:"):].strip()
+                if kv.startswith("user:"):
+                    scope = "user"
+                    kv = kv[len("user:"):].strip()
+                key, _, value = kv.partition(" ")
+                if not key or not value:
+                    console.print("[yellow]用法: # state:键 值"
+                                  "（如 # state:测试环境 Langgraph）[/yellow]")
+                    continue
+                rec = agent.memory_bank.set_state(key, value,
+                                                  evidence_id="manual", scope=scope)
+                where = "用户级" if scope == "user" else "项目级"
+                console.print(f"[green]✓ 状态已更新[/green] [dim]({where})[/dim] "
+                              f"{rec['key']} = {rec['value']}")
+                continue
+            card = agent.memory_bank.capture_directive(content, scope=scope)
+            where = "用户级" if scope == "user" else "项目级"
+            console.print(f"[green]✓ 已记住[/green] [dim]({where} · "
+                          f"{card.get('category')})[/dim] {card['content'][:80]}")
+            continue
         if text.startswith("/resume"):
             parts = text.split(maxsplit=1)
             target = parts[1] if len(parts) > 1 else "latest"
             loaded = (get_latest_session(workspace) if target == "latest"
-                      else load_session(target))
+                      else load_session(target, workspace=workspace))
             if loaded is None:
                 console.print(f"[red]会话 {target} 不存在。/sessions 查看本工作区的会话。[/red]")
                 continue

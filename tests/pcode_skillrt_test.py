@@ -75,8 +75,9 @@ class FakeTools:
 class L:
     def chat(s, m, tools=None): return M("任务完成")
 
+import pcode.paths as pp
 import pcode.session as ps
-ps.SESSIONS_DIR = ROOT / "sessions"
+pp.PROJECTS_ROOT = ROOT / "projects"     # 会话分区根改道临时目录
 from pcode.session import Session
 from pcode.agent import Agent
 agent = Agent(llm=L(), tools=FakeTools(), skill_menu=render_retrieval_hint(31),

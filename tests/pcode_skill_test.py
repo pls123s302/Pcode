@@ -10,8 +10,9 @@ import pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import pcode.skills as pskill
 pskill.USER_SKILLS_ROOT = ROOT / "user_skills"       # 用户级改道
+import pcode.paths as pp
 import pcode.session as ps
-ps.SESSIONS_DIR = ROOT / "sessions"
+pp.PROJECTS_ROOT = ROOT / "projects"     # 会话分区根改道临时目录
 
 from pcode.skills import (discover_skills, get_skill, extract_description,
                           render_skill_menu, create_load_skill_tool)

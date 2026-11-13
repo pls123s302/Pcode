@@ -22,7 +22,26 @@ _MAX_TEXT = 300        # 每条文本截断后再扫（信噪比限额：决策�
 _CAP_DECISIONS = 5     # 产出硬顶——记忆条尺寸和任务长度彻底脱钩
 _CAP_FILES = 10
 _CAP_CONTENT = 1200
+_CAP_STATES = 5        # 状态网硬顶（同上：单任务产不出5个可变事实就是网眼太松）
 _MIN_CONFIDENCE = 0.5
+
+# ⑤ 状态网：捞"可变事实"（key=当前值）——状态层的原料。
+# 键允许中文（\w 含 CJK）；同 key 后者覆盖前者（状态=现在，新值取代旧值）
+_STATE_NET_PATTERNS = [
+    re.compile(r"([\w.\-]{1,30})\s*(?:改成|调整为|设置为|设为|改为)\s*([^\s，。；:]{1,60})"),
+    re.compile(r"([\w.\-]{1,30})\s*(?:现在是|当前是|当前值为)\s*([^\s，。；:]{1,60})"),
+]
+_STATE_KEY_STOP = {"它", "这", "那", "其"}   # 代词不是键
+
+
+def _scan_states(text: str, out: dict) -> None:
+    """状态网：命中模式即提取 key=当前值，同 key 后者覆盖前者"""
+    for pat in _STATE_NET_PATTERNS:
+        for m in pat.finditer(text):
+            key, val = m.group(1).strip(), m.group(2).strip()
+            if key in _STATE_KEY_STOP or not val:
+                continue
+            out[key] = val
 
 
 def _is_error(result: str) -> bool:
@@ -55,6 +74,7 @@ def reflect(task: str, records: list, success: bool | None = None) -> dict | Non
     没干过工具活也没说过决策的琐碎任务 → 返回 None（闸门前的初筛）。
     """
     tools, errors, decisions, files = [], [], [], set()
+    states = {}                                  # 状态网产出：key -> 当前值
     has_tool = False
 
     for r in records:
@@ -73,11 +93,14 @@ def reflect(task: str, records: list, success: bool | None = None) -> dict | Non
         elif kind == "assistant":
             text = str(r.get("text") or r.get("content") or "")[:_MAX_TEXT]
             _scan_decisions(text, decisions)
+            _scan_states(text, states)           # ⑤ 状态网与决策网同趟扫描
         elif kind == "system" or kind == "compaction":
             continue         # 框架注入块和事件不入网
 
     if not has_tool and not decisions:
         return None          # 初筛：琐碎任务（纯问答/寒暄）不值得任何加工
+    for d in decisions:      # 决策句里的"改成 X"是状态网的高产地
+        _scan_states(d, states)
 
     if success is None:                  # 无外部判定时退回保守推断（MiniCode同款）
         success = not errors
@@ -119,5 +142,6 @@ def reflect(task: str, records: list, success: bool | None = None) -> dict | Non
         "tags": tags,
         "confidence": round(confidence, 2),
         "success": success,
+        "states": dict(list(states.items())[:_CAP_STATES]),
         "timestamp": time.time(),
     }

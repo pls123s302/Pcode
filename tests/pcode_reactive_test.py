@@ -10,10 +10,11 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 ROOT = Path(tempfile.mkdtemp(prefix="pcode_test_"))
 import pcode.memory as pm
+import pcode.paths as pp
 import pcode.session as ps
 
 pm.CACHE_ROOT = ROOT / "cache"
-ps.SESSIONS_DIR = ROOT / "sessions"
+pp.PROJECTS_ROOT = ROOT / "projects"     # 会话分区根改道临时目录
 
 from pcode.agent import Agent, _is_context_overflow
 from pcode.session import Session, load_session

@@ -2,7 +2,7 @@
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
-![Tests](https://img.shields.io/badge/offline_tests-136_pass-brightgreen)
+![Tests](https://img.shields.io/badge/offline_tests-154_pass-brightgreen)
 ![Benchmark](https://img.shields.io/badge/benchmark-12%2F12-success)
 
 **轻量级终端编码 Agent** —— 不只是聊天框：它动手读代码、改文件、跑测试拿证据，
@@ -43,8 +43,20 @@ Agent 的第一杀手是上下文膨胀。Pcode 用两个层次治理它：
 - **遗传**：策展人每 10 个任务一轮（全系统唯一花 LLM 的地方，≤2 次调用）——
   近重复合并（Jaccard ≥ 0.85）、验尸过时标记（引用文件已消失）、相似簇熬成洞见（记忆长出元记忆）。
 
+**双作用域**：用户级 `~/.pcode/memory/` 存跨项目通用经验（用户偏好、环境约定），
+项目级 `~/.pcode/projects/<工作区键>/memory/` 存项目专属记忆与状态——按工作区划分、
+留在用户目录下与项目仓库解耦；检索跨库同一语料打分（BM25 全局 IDF），注入带来源标签。
+**会话同键分区**：每个项目的会话卷宗落 `~/.pcode/projects/<同一工作区键>/sessions/`——
+`/sessions` 只扫本项目目录（不再全盘读文件过滤），`/resume <id>` 本区没有再扫他家；
+一个项目 = 用户目录下的一个键目录，记忆、状态、会话齐活。
+**显式通道**：聊天里 `# 一句话` 直接记账入库（不经反思网——概率捕捞捞不到的规定，说了就算），
+`# user:` 前缀入用户级；**状态账本**：`# state:键 值` 记录"世界现在是什么样"，
+同 key 新值直接覆盖旧值，`<最新状态>` 块随任务注入（固定微小剂量）。
+状态也有轻量生命周期：手动写入的状态优先注入且**永不褪色**，自动捕获的状态
+14 天一个确认窗、有效置信度逐窗减半，约 28 天未被再次确认即退场——
+自动捕获是便签会褪色，显式写入是钉子不褪色。
 存储双格式：`memory.json` 唯一事实源（完整元数据）+ `MEMORY.md` 人类可读投影（只读，每次重生成）；
-原子写入；容量三重封顶（200 条 / 25KB / 最老优先逐出）。
+原子写入；容量封顶（条目 200 条 / 25KB，状态键 64 个，超限自动先于手动逐出）。
 
 ### 3️⃣ Skill 能力体系 —— "原子工具 — 高层 Skill — 技能菜单"三层路由
 
@@ -107,8 +119,9 @@ Agent 的第一杀手是上下文膨胀。Pcode 用两个层次治理它：
 pcode/
 ├── agent.py         # 主循环：工具调用循环、相位跟踪、撞墙抢救、记忆闭环接线
 ├── memory.py        # 上下文治理：sweep 外置、FULL 语义压缩、token 估算
-├── session.py       # 两世界持久化：增量保存、transcript 无损卷宗、/resume /replay
-├── memory_bank.py   # 长期记忆库：检索注入、反馈 ±2/−1、策展人（去重/验尸/熬洞见）
+├── session.py       # 两世界持久化：增量保存、transcript 无损卷宗、/resume /replay（按工作区分区）
+├── paths.py         # ~/.pcode 路径布局：workspace_key 推导，项目数据分区的单一事实源
+├── memory_bank.py   # 长期记忆库：双作用域（用户级+项目级）、检索注入、反馈 ±2/−1、策展人
 ├── reflection.py    # 反思引擎：四网扫描（错误/决策/事实/工具）、算术置信闸门
 ├── skills.py        # Skill 体系：双根目录发现、菜单幂等渲染、渐进披露/直接加载双 regime
 ├── permissions.py   # 四层审查链路：规则过滤、自我修改边界、注入围栏、人工确认
@@ -119,7 +132,7 @@ pcode/
 ├── llm.py           # OpenAI 兼容接口封装（DashScope/DeepSeek/GLM 通用）
 ├── config.py        # ~/.pcode/settings.json 读取
 └── cli.py           # 终端界面（rich REPL、命令区/任务区、会话管理）
-tests/               # 7 个离线套件（136 项断言，假 LLM 零成本）+ 1 个真实 API 冒烟
+tests/               # 7 个离线套件（154 项断言，假 LLM 零成本）+ 1 个真实 API 冒烟
 benchmarks/          # 12 场景真模型鲁棒性基准（8 个任务基准 + 4 个对抗场景）
 ```
 
@@ -164,7 +177,7 @@ pcode
 
 ## 测试与基准
 
-**7 个离线测试套件 · 136 项断言**，全程假 LLM、临时目录落盘——零 API 成本，可反复回归：
+**7 个离线测试套件 · 154 项断言**，全程假 LLM、临时目录落盘——零 API 成本，可反复回归：
 
 ```bash
 for f in tests/pcode_*_test.py; do python "$f"; done

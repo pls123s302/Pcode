@@ -15,6 +15,7 @@ import re
 from pathlib import Path
 
 from pcode.tool import tool
+from pcode.memory_bank import adaptive_top_k   # 压力自适应剂量（与记忆块同一条斜坡）
 
 USER_SKILLS_ROOT = Path.home() / ".pcode" / "skills"   # 测试可改道
 
@@ -126,7 +127,7 @@ def create_load_skill_tool(workspace: str):
 MENU_MAX = 30           # 菜单模式容量上限（"200"拐点的工程化落地）
 SKILL_TOP_K = 3         # 每次召回的候选数
 SKILL_GATE = 0.25       # 相关度门槛（低于此不进注入块）
-PRESSURE_GATE = 0.75    # 上下文高压拒注线（与记忆块同款）
+# 高压拒注已升级：由 memory_bank.adaptive_top_k 的斜坡接管（<0.4 全额 → ≥0.75 关门）
 
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9_]+")
 _HAN_RE = re.compile(r"[\u4e00-\u9fff]+")
@@ -175,10 +176,11 @@ def search_skills(cwd: str, query: str, top_k: int = SKILL_TOP_K,
 
 
 def injection_block(cwd: str, task: str, context_usage: float) -> str:
-    """<相关技能>块（镜像 memory_bank.injection_block）：高压拒注、无命中不注"""
-    if context_usage >= PRESSURE_GATE:
+    """<相关技能>块（镜像 memory_bank.injection_block）：剂量随压力自适应收缩、无命中不注"""
+    top_k = adaptive_top_k(context_usage)
+    if top_k <= 0:
         return ""
-    hits = search_skills(cwd, task)
+    hits = search_skills(cwd, task, top_k=top_k)
     if not hits:
         return ""
     lines = ["<相关技能>"]

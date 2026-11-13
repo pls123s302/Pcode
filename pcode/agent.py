@@ -168,6 +168,12 @@ class Agent:
                 messages[-1]["content"] = block + "\n\n" + str(messages[-1]["content"])
                 self._injected_ids = ids
 
+            # 状态注入（存在即注入：≤12行固定剂量，不随斜坡收缩——
+            # "世界现在是什么样"几乎总相关；后拼所以排在记忆块上方）
+            state_block = self.memory_bank.format_states()
+            if state_block and messages and _role_of(messages[-1]) == "user":
+                messages[-1]["content"] = state_block + "\n\n" + str(messages[-1]["content"])
+
         # 技能注入（仅检索模式有skill_search；菜单模式的技能经system头常驻）
         if self.skill_search is not None:
             sblock = self.skill_search(task, pressure)
@@ -183,14 +189,19 @@ class Agent:
                 else messages
             r = reflect(task, records, success)
             if r:
-                self.memory_bank.add_entry(r["category"], r["content"], r["tags"])
+                entry = self.memory_bank.add_entry(r["category"], r["content"], r["tags"])
+                for key, value in (r.get("states") or {}).items():
+                    # 状态卡证据指向本次事件卡：可审计"这个值从哪来"
+                    self.memory_bank.set_state(key, value, evidence_id=entry["id"])
                 if on_tool:
                     on_tool("🧠 记忆沉淀",
                             f"[{r['category']}] {r['content'][:60]}")
             report = self.memory_bank.maintain(llm=self.llm)
             if report and on_tool:
                 on_tool("🧠 记忆策展",
-                        f"去重{report['dedup']}条 过时{report['stale']}条 "
+                        f"去重{report['dedup']} 过时{report['stale']} "
+                        f"衰老{report.get('decay', 0)} "
+                        f"状态淘汰{report.get('states', 0)} "
                         f"洞见{report['insights']}条")
             self.memory_bank.feedback(success, self._injected_ids)
 

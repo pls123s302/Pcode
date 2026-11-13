@@ -1,16 +1,18 @@
 # -*- coding: utf-8 -*-
-"""Pcode 记忆系统离线验证：反思四网/闸门/检索/注入/反馈/策展/集成
+"""Pcode 记忆系统离线验证：反思四网/闸门/检索/注入/反馈/状态层/策展/集成
 全程假LLM零API；落盘全在临时目录，不碰 ~/.pcode"""
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 ROOT = Path(tempfile.mkdtemp(prefix="pcode_mem_test_"))
+import pcode.paths as pp
 import pcode.session as ps
-ps.SESSIONS_DIR = ROOT / "sessions"
+pp.PROJECTS_ROOT = ROOT / "projects"     # 会话分区根改道临时目录
 
 from pcode.memory_bank import MemoryBank, STALE_MARK
 from pcode.reflection import reflect
@@ -133,8 +135,36 @@ check("反馈: 成功+2", bank.entries[0]["usage_count"] == 2)
 bank.feedback(False, ids)
 check("反馈: 失败−1(不为负)", bank.entries[0]["usage_count"] == 1)
 
-print("== 三、策展人 ==")
-bank2 = MemoryBank(root=ROOT / "bank2", workspace=str(ROOT / "ws"))
+print("== 三、状态层：覆盖/手动优先/褪色淘汰 ==")
+bank_s = MemoryBank(root=ROOT / "bank_s")
+bank_s.set_state("端口", "8080")
+bank_s.set_state("端口", "9000")                      # 同 key 再写
+check("状态: 同key覆盖且不增行", bank_s.states["端口"]["value"] == "9000"
+      and len(bank_s.states) == 1)
+bank_s.set_state("分支", "main")                       # 新鲜自动状态
+bank_s.set_state("测试环境", "Langgraph", evidence_id="manual")
+check("状态: 手动写入置信度1.0", bank_s.states["测试环境"]["confidence"] == 1.0)
+st = bank_s._user
+st.states["端口"]["updated_at"] = time.time() - 30 * 86400       # 自动状态30天没再确认
+st.states["测试环境"]["updated_at"] = time.time() - 400 * 86400  # 手动更老，但免疫褪色
+block_s = bank_s.format_states()
+check("注入: 跌破退场线的自动状态不上场", "端口" not in block_s)
+check("注入: 手动行排第一", block_s.splitlines()[1].startswith("- [")
+      and "测试环境" in block_s.splitlines()[1])
+check("注入: 新鲜自动状态在手动之后", "分支" in block_s
+      and block_s.index("分支") > block_s.index("测试环境"))
+evicted = st.decay_states()
+check("淘汰: 过期自动状态被删", evicted == 1 and "端口" not in st.states)
+check("淘汰: 手动状态免疫褪色", "测试环境" in st.states)
+for i in range(70):                                   # 灌垃圾键顶爆硬顶
+    st.states[f"杂k{i:02d}"] = {"key": f"杂k{i:02d}", "value": "x", "evidence_id": "",
+                                "confidence": 0.75, "updated_at": time.time()}
+st._prune_states()
+check("淘汰: 硬顶64条且手动幸存", len(st.states) <= 64 and "测试环境" in st.states)
+
+print("== 四、策展人 ==")
+bank2 = MemoryBank(root=ROOT / "bank2", workspace=str(ROOT / "ws"),
+                   project_root=ROOT / "proj_mem")
 (ROOT / "ws").mkdir(parents=True, exist_ok=True)
 (ROOT / "ws" / "alive.py").write_text("x", encoding="utf-8")
 for i in range(9):
@@ -148,6 +178,7 @@ bank2.add_entry("reflection", "yaml 缩进陷阱：xyztool 的 safe_load 处理 
 bank2.add_entry("task_context", "改过 ghost_file.py 的编码", ["success"])
 rpt = bank2.maintain(llm=ScriptLLM())
 check("周期: 第10次触发并返回报告", rpt is not None)
+check("策展: 报告含状态淘汰数", "states" in rpt)
 check("策展: 近重复去重(留长的删短的)", rpt["dedup"] >= 1)
 check("策展: 验尸给幽灵文件打过时标记", rpt["stale"] == 1
       and any(e["content"].startswith(STALE_MARK) for e in bank2.entries))
@@ -157,7 +188,7 @@ check("策展: 过时条目绝不出现在注入结果里",
       all(not e["content"].startswith(STALE_MARK)
           for e in bank2.search("ghost_file.py 的编码改动")))
 
-print("== 四、Agent 集成（注入→干活→沉淀→反馈全链）==")
+print("== 五、Agent 集成（注入→干活→沉淀→反馈全链）==")
 bank3 = MemoryBank(root=ROOT / "bank3")
 sess = Session(workspace=str(ROOT))
 agent = Agent(llm=ScriptLLM(), tools=FakeTools(), memory_bank=bank3, max_steps=10)
